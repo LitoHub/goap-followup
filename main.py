@@ -5,18 +5,17 @@ import hmac
 import json
 import logging
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 from fastapi import FastAPI, Depends, Request, HTTPException
 from sqlalchemy.orm import Session
 
 import config
 from database import get_db, init_db
-from models import Lead, ScheduledTask, SystemLog
+from models import Lead, SystemLog
 from tools.twenty_client import TwentyCRMClient
 from tools.bison_client import BisonClient
 from tools.sentiment import analyze_sentiment
-from tools.email_templates import lead_magnet_email
 from scheduler import start_scheduler, shutdown_scheduler
 
 logging.basicConfig(level=getattr(logging, config.LOG_LEVEL))
@@ -51,19 +50,21 @@ async def lifespan(app: FastAPI):
     logger.info("Scheduler stopped")
 
 
-app = FastAPI(title="Follow-up System", lifespan=lifespan)
+app = FastAPI(title="GOAP Follow-up System", lifespan=lifespan)
 
 
 # --- Health Check ---
 
 @app.get("/health")
 def health_check(db: Session = Depends(get_db)):
-    pending = db.query(ScheduledTask).filter(ScheduledTask.status == "pending").count()
     total_leads = db.query(Lead).count()
+    active_leads = db.query(Lead).filter(
+        Lead.campaign_status.in_(["Lead Magnet Sent", "Follow-up 1", "Follow-up 2"])
+    ).count()
     return {
         "status": "ok",
-        "pending_tasks": pending,
         "total_leads": total_leads,
+        "active_leads": active_leads,
     }
 
 
@@ -71,53 +72,57 @@ def health_check(db: Session = Depends(get_db)):
 
 @app.post("/webhook/bison")
 async def webhook_bison(request: Request, db: Session = Depends(get_db)):
-    """Handle new_reply events from Bison.
+    """Handle webhook events from Bison.
 
-    Two paths:
-    1. Existing lead replied → kill switch (cancel follow-ups, mark Responded)
-    2. New lead replied → sentiment analysis → create in CRM if positive
+    Key events:
+    - Contact Interested: New positive lead → sentiment check → create in CRM
+    - Contact Replied: Lead replied to follow-up → kill switch
     """
     try:
         payload = await request.json()
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON payload")
 
-    lead_email = payload.get("email", "").strip().lower()
-    reply_text = payload.get("reply_text", "") or payload.get("body", "")
-    inbox_id = payload.get("inbox_id", "") or payload.get("sender_email", "")
+    # Log raw payload for debugging (we'll refine parsing as we learn the format)
+    event_type = payload.get("event", payload.get("type", "unknown"))
+    log_action(db, "bison_webhook_received",
+               f"Event: {event_type} | Keys: {list(payload.keys())}")
+    logger.info(f"Bison webhook received: event={event_type}")
+
+    # Extract lead data — Bison webhook payloads vary by event.
+    # Common fields based on API docs: lead info, reply info, campaign info.
+    lead_data = payload.get("data", payload.get("lead", payload))
+    lead_email = (
+        lead_data.get("lead_email", "")
+        or lead_data.get("email", "")
+        or payload.get("email", "")
+    ).strip().lower()
 
     if not lead_email:
-        raise HTTPException(status_code=400, detail="Missing email in payload")
+        log_action(db, "bison_webhook_ignored",
+                   f"No email found in payload. Keys: {list(payload.keys())}",
+                   level="warning")
+        return {"status": "ignored", "reason": "no_email"}
 
-    log_action(db, "webhook_received", f"Bison reply from {lead_email}")
-
-    # Check if lead already exists
+    # Check if lead already exists in our DB
     existing_lead = db.query(Lead).filter(Lead.email == lead_email).first()
 
     if existing_lead:
-        return _handle_existing_lead_reply(db, existing_lead, reply_text)
+        return _handle_existing_lead_reply(db, existing_lead, lead_data)
     else:
-        return _handle_new_lead(db, lead_email, reply_text, inbox_id, payload)
+        return _handle_new_lead(db, lead_email, lead_data, payload)
 
 
-def _handle_existing_lead_reply(db: Session, lead: Lead, reply_text: str) -> dict:
-    """Kill switch: cancel follow-ups when a lead replies."""
+def _handle_existing_lead_reply(db: Session, lead: Lead, lead_data: dict) -> dict:
+    """Kill switch: cancel follow-ups when a lead in our system replies."""
     active_statuses = {"Lead Magnet Sent", "Follow-up 1", "Follow-up 2", "Follow-up 3"}
 
     if lead.campaign_status in active_statuses:
-        # Cancel all pending tasks for this lead
-        pending_tasks = db.query(ScheduledTask).filter(
-            ScheduledTask.lead_id == lead.id,
-            ScheduledTask.status == "pending",
-        ).all()
-        for task in pending_tasks:
-            task.status = "cancelled"
-
         lead.campaign_status = "Responded"
         db.commit()
 
         log_action(db, "sequence_killed",
-                   f"Lead {lead.email} replied. Cancelled {len(pending_tasks)} pending tasks.",
+                   f"Lead {lead.email} replied. Status changed to Responded.",
                    lead_id=lead.id)
 
         # Update Twenty CRM
@@ -128,41 +133,58 @@ def _handle_existing_lead_reply(db: Session, lead: Lead, reply_text: str) -> dic
                     customFields={"campaign_status": "Responded"},
                 )
                 twenty.create_note(
-                    f"Reply detected — follow-up sequence cancelled. "
-                    f"{len(pending_tasks)} pending tasks removed.",
+                    "Reply detected — follow-up sequence cancelled automatically.",
                     contact_ids=[lead.twenty_contact_id] if lead.twenty_contact_id else None,
                     opportunity_id=lead.twenty_opportunity_id,
                 )
         except Exception as e:
             log_action(db, "crm_update_failed", str(e), lead_id=lead.id, level="error")
 
-        return {"status": "responded", "cancelled_tasks": len(pending_tasks)}
+        return {"status": "responded", "email": lead.email}
 
-    # Lead already responded or finished — just log
     log_action(db, "duplicate_reply",
                f"Lead {lead.email} replied again (status: {lead.campaign_status})",
                lead_id=lead.id)
     return {"status": "already_responded"}
 
 
-def _handle_new_lead(db: Session, email: str, reply_text: str,
-                     inbox_id: str, payload: dict) -> dict:
+def _handle_new_lead(db: Session, email: str, lead_data: dict, payload: dict) -> dict:
     """Analyze sentiment and create lead in DB + CRM if positive."""
-    sentiment = analyze_sentiment(reply_text)
+    reply_text = (
+        lead_data.get("reply_text", "")
+        or lead_data.get("body", "")
+        or payload.get("reply_text", "")
+        or payload.get("body", "")
+    )
 
-    log_action(db, "sentiment_analyzed",
-               f"Lead {email} classified as {sentiment}")
+    sentiment = analyze_sentiment(reply_text)
+    log_action(db, "sentiment_analyzed", f"Lead {email} classified as {sentiment}")
 
     if sentiment == "negative":
         return {"status": "negative_sentiment", "email": email}
 
+    # Extract Bison IDs
+    bison_lead_id = (
+        lead_data.get("lead_id")
+        or lead_data.get("id")
+        or payload.get("lead_id")
+    )
+    inbox_id = (
+        lead_data.get("sender_email", "")
+        or lead_data.get("sender_email_id", "")
+        or payload.get("sender_email", "")
+        or payload.get("inbox_id", "")
+    )
+    first_name = lead_data.get("first_name", "") or lead_data.get("lead_name", "").split()[0] if lead_data.get("lead_name") else ""
+    last_name = lead_data.get("last_name", "")
+
     # Create lead in local DB
     lead = Lead(
         email=email,
-        first_name=payload.get("first_name", ""),
-        last_name=payload.get("last_name", ""),
-        bison_lead_id=payload.get("lead_id"),
-        bison_inbox_id=inbox_id,
+        first_name=first_name,
+        last_name=last_name,
+        bison_lead_id=bison_lead_id,
+        bison_inbox_id=str(inbox_id),
         campaign_status="New",
         original_reply_text=reply_text,
         sentiment=sentiment,
@@ -172,7 +194,7 @@ def _handle_new_lead(db: Session, email: str, reply_text: str,
     db.refresh(lead)
 
     log_action(db, "lead_created",
-               f"Positive lead created: {email}",
+               f"Positive lead created: {email} (bison_lead_id={bison_lead_id})",
                lead_id=lead.id)
 
     # Create in Twenty CRM
@@ -181,18 +203,18 @@ def _handle_new_lead(db: Session, email: str, reply_text: str,
             email=email,
             first_name=lead.first_name or "",
             last_name=lead.last_name or "",
-            custom_fields={"bison_inbox_id": inbox_id},
+            custom_fields={"bison_inbox_id": str(inbox_id)},
         )
         person_id = person.get("id", "")
         lead.twenty_contact_id = person_id
 
         opportunity = twenty.create_opportunity(
             name=f"Follow-up: {email}",
-            stage="New",
+            stage="LEAD",
             contact_id=person_id,
             custom_fields={
                 "campaign_status": "New",
-                "bison_inbox_id": inbox_id,
+                "bison_inbox_id": str(inbox_id),
             },
         )
         opp_id = opportunity.get("id", "")
@@ -200,7 +222,7 @@ def _handle_new_lead(db: Session, email: str, reply_text: str,
         db.commit()
 
         twenty.create_note(
-            f"Positive sentiment detected — lead created from Bison reply.",
+            "Positive sentiment detected — lead created from Bison reply.",
             contact_ids=[person_id] if person_id else None,
             opportunity_id=opp_id,
         )
@@ -221,9 +243,10 @@ def _handle_new_lead(db: Session, email: str, reply_text: str,
 async def webhook_twenty(request: Request, db: Session = Depends(get_db)):
     """Handle opportunity.updated events from Twenty CRM.
 
-    Triggers lead magnet delivery when:
-    - lead_magnet_url is set
-    - campaign_status is moved to 'Ready to Send'
+    When user sets lead_magnet_url and moves to 'Ready to Send':
+    1. Attach the lead to the follow-up campaign in Bison
+    2. Update local DB status
+    3. Bison handles the 3-6-9 day follow-up sequence automatically
     """
     body_bytes = await request.body()
 
@@ -242,7 +265,7 @@ async def webhook_twenty(request: Request, db: Session = Depends(get_db)):
     event = payload.get("event", "")
     data = payload.get("data", {})
 
-    log_action(db, "webhook_received", f"Twenty CRM event: {event}")
+    log_action(db, "twenty_webhook_received", f"Event: {event}")
 
     if event != "opportunity.updated":
         return {"status": "ignored", "event": event}
@@ -267,36 +290,34 @@ async def webhook_twenty(request: Request, db: Session = Depends(get_db)):
     # Update lead magnet URL in local DB
     lead.lead_magnet_url = magnet_url
 
-    # Send the lead magnet email via Bison
-    name = f"{lead.first_name or ''} {lead.last_name or ''}".strip()
-    subject, body = lead_magnet_email(name, magnet_url)
+    # Attach lead to the follow-up campaign in Bison
+    campaign_id = config.BISON_FOLLOWUP_CAMPAIGN_ID
+    if not campaign_id:
+        log_action(db, "config_error",
+                   "BISON_FOLLOWUP_CAMPAIGN_ID not set",
+                   lead_id=lead.id, level="error")
+        raise HTTPException(status_code=500, detail="Follow-up campaign ID not configured")
+
+    if not lead.bison_lead_id:
+        log_action(db, "missing_bison_id",
+                   f"Lead {lead.email} has no bison_lead_id — cannot attach to campaign",
+                   lead_id=lead.id, level="error")
+        raise HTTPException(status_code=400, detail="Lead has no Bison lead ID")
 
     try:
-        bison.send_email(lead.bison_inbox_id, lead.email, subject, body)
+        bison.attach_leads_to_campaign(campaign_id, [lead.bison_lead_id])
     except Exception as e:
-        log_action(db, "email_send_failed", str(e), lead_id=lead.id, level="error")
-        raise HTTPException(status_code=500, detail="Failed to send lead magnet email")
+        log_action(db, "bison_attach_failed", str(e), lead_id=lead.id, level="error")
+        raise HTTPException(status_code=500, detail="Failed to attach lead to Bison campaign")
 
     now = datetime.now(timezone.utc)
     lead.campaign_status = "Lead Magnet Sent"
     lead.last_contact_date = now
     db.commit()
 
-    log_action(db, "lead_magnet_sent",
-               f"Lead magnet sent to {lead.email}: {magnet_url}",
-               lead_id=lead.id)
-
-    # Schedule follow-up 1 (3 days from now)
-    task = ScheduledTask(
-        lead_id=lead.id,
-        task_type="follow_up_1",
-        scheduled_time=now + timedelta(days=config.FOLLOWUP_DELAY_DAYS),
-    )
-    db.add(task)
-    db.commit()
-
-    log_action(db, "followup_scheduled",
-               f"Follow-up 1 scheduled for {task.scheduled_time.isoformat()}",
+    log_action(db, "followup_activated",
+               f"Lead {lead.email} attached to Bison campaign {campaign_id}. "
+               f"Lead magnet URL: {magnet_url}",
                lead_id=lead.id)
 
     # Update Twenty CRM
@@ -309,16 +330,15 @@ async def webhook_twenty(request: Request, db: Session = Depends(get_db)):
             },
         )
         twenty.create_note(
-            f"Lead magnet email sent at {now.strftime('%Y-%m-%d %H:%M UTC')}. "
-            f"URL: {magnet_url}. Follow-up 1 scheduled for "
-            f"{task.scheduled_time.strftime('%Y-%m-%d %H:%M UTC')}.",
+            f"Lead magnet sent. Follow-up sequence activated in Bison "
+            f"(campaign {campaign_id}). URL: {magnet_url}.",
             contact_ids=[lead.twenty_contact_id] if lead.twenty_contact_id else None,
             opportunity_id=opportunity_id,
         )
     except Exception as e:
         log_action(db, "crm_update_failed", str(e), lead_id=lead.id, level="error")
 
-    return {"status": "lead_magnet_sent", "lead_id": lead.id, "email": lead.email}
+    return {"status": "followup_activated", "lead_id": lead.id, "email": lead.email}
 
 
 def _verify_twenty_signature(body: bytes, timestamp: str, signature: str) -> bool:

@@ -84,7 +84,7 @@ class TwentyCRMClient:
 
     # --- Opportunities ---
 
-    def create_opportunity(self, name: str, stage: str = "New",
+    def create_opportunity(self, name: str, stage: str = "LEAD",
                            contact_id: str = "", custom_fields: dict | None = None) -> dict:
         """Create a new opportunity in Twenty CRM."""
         payload: dict[str, Any] = {

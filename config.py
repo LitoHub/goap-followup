@@ -11,6 +11,7 @@ TWENTY_WEBHOOK_SECRET = os.getenv("TWENTY_WEBHOOK_SECRET", "")
 # Bison (EmailBison)
 BISON_API_KEY = os.getenv("BISON_API_KEY", "")
 BISON_BASE_URL = os.getenv("BISON_BASE_URL", "https://dedi.emailbison.com")
+BISON_FOLLOWUP_CAMPAIGN_ID = os.getenv("BISON_FOLLOWUP_CAMPAIGN_ID", "")  # Pre-built follow-up campaign
 
 # Google Gemini (sentiment analysis)
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
