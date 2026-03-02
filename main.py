@@ -111,6 +111,26 @@ def get_leads(db: Session = Depends(get_db)):
     ]
 
 
+@app.get("/debug/pipeline-records")
+def debug_pipeline_records():
+    """List all GOAP pipeline records in Twenty CRM."""
+    try:
+        result = twenty._request("GET", "/rest/goapNewPipelines")
+        return result
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.get("/debug/people")
+def debug_people():
+    """List recent people in Twenty CRM."""
+    try:
+        result = twenty._request("GET", "/rest/people?limit=10&orderBy=createdAt[AscNullsFirst]")
+        return result
+    except Exception as e:
+        return {"error": str(e)}
+
+
 # --- Bison Webhook ---
 
 @app.post("/webhook/bison")
