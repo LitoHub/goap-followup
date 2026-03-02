@@ -129,15 +129,25 @@ async def webhook_bison(request: Request, db: Session = Depends(get_db)):
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON payload")
 
-    # Log raw payload for debugging (we'll refine parsing as we learn the format)
+    # Log raw payload for debugging
     event_type = payload.get("event", payload.get("type", "unknown"))
     log_action(db, "bison_webhook_received",
                f"Event: {event_type} | Keys: {list(payload.keys())}")
     logger.info(f"Bison webhook received: event={event_type}")
 
     # Extract lead data — Bison webhook payloads vary by event.
-    # Common fields based on API docs: lead info, reply info, campaign info.
     lead_data = payload.get("data", payload.get("lead", payload))
+
+    # Only process replies from our outbound campaign
+    campaign_id = (
+        lead_data.get("campaign_id")
+        or payload.get("campaign_id")
+    )
+    if config.BISON_OUTBOUND_CAMPAIGN_ID and str(campaign_id) != config.BISON_OUTBOUND_CAMPAIGN_ID:
+        log_action(db, "bison_webhook_ignored",
+                   f"Campaign {campaign_id} doesn't match outbound campaign "
+                   f"{config.BISON_OUTBOUND_CAMPAIGN_ID}")
+        return {"status": "ignored", "reason": "wrong_campaign"}
     lead_email = (
         lead_data.get("lead_email", "")
         or lead_data.get("email", "")
