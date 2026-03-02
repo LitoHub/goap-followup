@@ -100,6 +100,8 @@ def get_leads(db: Session = Depends(get_db)):
             "first_name": l.first_name,
             "last_name": l.last_name,
             "bison_lead_id": l.bison_lead_id,
+            "bison_reply_id": l.bison_reply_id,
+            "bison_sender_email_id": l.bison_sender_email_id,
             "bison_inbox_id": l.bison_inbox_id,
             "twenty_contact_id": l.twenty_contact_id,
             "twenty_opportunity_id": l.twenty_opportunity_id,
@@ -213,9 +215,19 @@ def _handle_new_lead(db: Session, email: str, lead_data: dict, payload: dict) ->
         or lead_data.get("id")
         or payload.get("lead_id")
     )
+    # Reply ID — needed to reply in the same email thread
+    bison_reply_id = (
+        lead_data.get("reply_id")
+        or payload.get("reply_id")
+        or payload.get("id")  # Bison may use 'id' for the reply
+    )
+    # Sender email account ID (integer) — needed for sending replies
+    bison_sender_email_id = (
+        lead_data.get("sender_email_id")
+        or payload.get("sender_email_id")
+    )
     inbox_id = (
         lead_data.get("sender_email", "")
-        or lead_data.get("sender_email_id", "")
         or payload.get("sender_email", "")
         or payload.get("inbox_id", "")
     )
@@ -230,6 +242,8 @@ def _handle_new_lead(db: Session, email: str, lead_data: dict, payload: dict) ->
         first_name=first_name,
         last_name=last_name,
         bison_lead_id=bison_lead_id,
+        bison_reply_id=bison_reply_id,
+        bison_sender_email_id=bison_sender_email_id,
         bison_inbox_id=str(inbox_id),
         campaign_status="New",
         original_reply_text=reply_text,
@@ -339,37 +353,61 @@ async def webhook_twenty(request: Request, db: Session = Depends(get_db)):
     # Update lead magnet URL in local DB
     lead.lead_magnet_url = magnet_url
 
-    # Attach lead to the follow-up campaign in Bison
-    campaign_id = config.BISON_FOLLOWUP_CAMPAIGN_ID
-    if not campaign_id:
-        log_action(db, "config_error",
-                   "BISON_FOLLOWUP_CAMPAIGN_ID not set",
+    # --- Step 1: Send the lead magnet email via Bison ---
+    if not lead.bison_reply_id or not lead.bison_sender_email_id:
+        log_action(db, "missing_bison_reply_info",
+                   f"Lead {lead.email} missing bison_reply_id={lead.bison_reply_id} "
+                   f"or sender_email_id={lead.bison_sender_email_id}",
                    lead_id=lead.id, level="error")
-        raise HTTPException(status_code=500, detail="Follow-up campaign ID not configured")
+        raise HTTPException(
+            status_code=400,
+            detail="Lead is missing Bison reply_id or sender_email_id for sending email",
+        )
 
-    if not lead.bison_lead_id:
-        log_action(db, "missing_bison_id",
-                   f"Lead {lead.email} has no bison_lead_id — cannot attach to campaign",
-                   lead_id=lead.id, level="error")
-        raise HTTPException(status_code=400, detail="Lead has no Bison lead ID")
+    lead_name = f"{lead.first_name or ''} {lead.last_name or ''}".strip() or "there"
+    email_body = (
+        f"Hi {lead.first_name or 'there'},\n\n"
+        f"Thanks for your interest! Here's the resource I mentioned:\n\n"
+        f"{magnet_url}\n\n"
+        f"Take a look and let me know if you have any questions — happy to help!\n\n"
+        f"Best,\nLauren"
+    )
 
     try:
-        bison.attach_leads_to_campaign(campaign_id, [lead.bison_lead_id])
+        bison.reply_to_email(
+            reply_id=lead.bison_reply_id,
+            message=email_body,
+            sender_email_id=lead.bison_sender_email_id,
+            to_emails=[{"name": lead_name, "email_address": lead.email}],
+        )
+        log_action(db, "lead_magnet_sent",
+                   f"Lead magnet email sent to {lead.email} via Bison reply_id={lead.bison_reply_id}",
+                   lead_id=lead.id)
     except Exception as e:
-        log_action(db, "bison_attach_failed", str(e), lead_id=lead.id, level="error")
-        raise HTTPException(status_code=500, detail="Failed to attach lead to Bison campaign")
+        log_action(db, "lead_magnet_send_failed", str(e), lead_id=lead.id, level="error")
+        raise HTTPException(status_code=500, detail="Failed to send lead magnet email via Bison")
 
+    # --- Step 2: Attach lead to follow-up campaign in Bison ---
+    campaign_id = config.BISON_FOLLOWUP_CAMPAIGN_ID
+    if campaign_id and lead.bison_lead_id:
+        try:
+            bison.attach_leads_to_campaign(campaign_id, [lead.bison_lead_id])
+            log_action(db, "followup_campaign_attached",
+                       f"Lead {lead.email} attached to Bison campaign {campaign_id}",
+                       lead_id=lead.id)
+        except Exception as e:
+            log_action(db, "bison_attach_failed", str(e), lead_id=lead.id, level="warning")
+    elif not campaign_id:
+        log_action(db, "config_warning",
+                   "BISON_FOLLOWUP_CAMPAIGN_ID not set — skipping follow-up attachment",
+                   lead_id=lead.id, level="warning")
+
+    # --- Step 3: Update local DB and Twenty CRM ---
     now = datetime.now(timezone.utc)
     lead.campaign_status = "Lead Magnet Sent"
     lead.last_contact_date = now
     db.commit()
 
-    log_action(db, "followup_activated",
-               f"Lead {lead.email} attached to Bison campaign {campaign_id}. "
-               f"Lead magnet URL: {magnet_url}",
-               lead_id=lead.id)
-
-    # Update Twenty CRM pipeline record
     try:
         twenty.update_pipeline_record(
             record_id,
@@ -377,8 +415,7 @@ async def webhook_twenty(request: Request, db: Session = Depends(get_db)):
             lastContactDate=now.isoformat(),
         )
         twenty.create_note(
-            f"Lead magnet sent. Follow-up sequence activated in Bison "
-            f"(campaign {campaign_id}). URL: {magnet_url}.",
+            f"Lead magnet sent to {lead.email}. URL: {magnet_url}.",
             contact_ids=[lead.twenty_contact_id] if lead.twenty_contact_id else None,
             pipeline_record_id=record_id,
         )

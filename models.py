@@ -20,6 +20,8 @@ class Lead(Base):
     first_name = Column(String(100), nullable=True)
     last_name = Column(String(100), nullable=True)
     bison_lead_id = Column(Integer, nullable=True)
+    bison_reply_id = Column(Integer, nullable=True)  # Reply ID for replying in same thread
+    bison_sender_email_id = Column(Integer, nullable=True)  # Sender email account ID
     bison_inbox_id = Column(String(100), nullable=False)
     twenty_contact_id = Column(String(100), nullable=True, unique=True)
     twenty_opportunity_id = Column(String(100), nullable=True, unique=True)
