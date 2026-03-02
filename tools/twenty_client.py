@@ -50,8 +50,9 @@ class TwentyCRMClient:
                 return response.json()
 
             except httpx.HTTPStatusError as e:
-                logger.error(f"Twenty CRM API error: {e.response.status_code} {e.response.text}")
-                raise
+                body = e.response.text[:500]
+                logger.error(f"Twenty CRM API error: {e.response.status_code} {body}")
+                raise Exception(f"Twenty CRM {e.response.status_code}: {body}") from e
             except httpx.RequestError as e:
                 logger.error(f"Twenty CRM request error: {e}")
                 if attempt < MAX_RETRIES - 1:
