@@ -68,6 +68,49 @@ def health_check(db: Session = Depends(get_db)):
     }
 
 
+@app.get("/logs")
+def get_logs(limit: int = 20, level: str | None = None,
+             db: Session = Depends(get_db)):
+    """Recent system logs for debugging."""
+    query = db.query(SystemLog).order_by(SystemLog.timestamp.desc())
+    if level:
+        query = query.filter(SystemLog.level == level)
+    logs = query.limit(limit).all()
+    return [
+        {
+            "id": log.id,
+            "action": log.action,
+            "details": log.details,
+            "level": log.level,
+            "lead_id": log.lead_id,
+            "timestamp": log.timestamp.isoformat() if log.timestamp else None,
+        }
+        for log in logs
+    ]
+
+
+@app.get("/leads")
+def get_leads(db: Session = Depends(get_db)):
+    """List all leads for debugging."""
+    leads = db.query(Lead).order_by(Lead.id.desc()).limit(50).all()
+    return [
+        {
+            "id": l.id,
+            "email": l.email,
+            "first_name": l.first_name,
+            "last_name": l.last_name,
+            "bison_lead_id": l.bison_lead_id,
+            "bison_inbox_id": l.bison_inbox_id,
+            "twenty_contact_id": l.twenty_contact_id,
+            "twenty_opportunity_id": l.twenty_opportunity_id,
+            "campaign_status": l.campaign_status,
+            "sentiment": l.sentiment,
+            "created_at": l.created_at.isoformat() if l.created_at else None,
+        }
+        for l in leads
+    ]
+
+
 # --- Bison Webhook ---
 
 @app.post("/webhook/bison")
