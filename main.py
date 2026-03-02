@@ -171,14 +171,14 @@ def _handle_existing_lead_reply(db: Session, lead: Lead, lead_data: dict) -> dic
         # Update Twenty CRM
         try:
             if lead.twenty_opportunity_id:
-                twenty.update_opportunity(
+                twenty.update_pipeline_record(
                     lead.twenty_opportunity_id,
-                    customFields={"campaign_status": "Responded"},
+                    campaignStatus="RESPONDED",
                 )
                 twenty.create_note(
                     "Reply detected — follow-up sequence cancelled automatically.",
                     contact_ids=[lead.twenty_contact_id] if lead.twenty_contact_id else None,
-                    opportunity_id=lead.twenty_opportunity_id,
+                    pipeline_record_id=lead.twenty_opportunity_id,
                 )
         except Exception as e:
             log_action(db, "crm_update_failed", str(e), lead_id=lead.id, level="error")
@@ -250,23 +250,23 @@ def _handle_new_lead(db: Session, email: str, lead_data: dict, payload: dict) ->
         person_id = person.get("id", "")
         lead.twenty_contact_id = person_id
 
-        opportunity = twenty.create_opportunity(
+        pipeline_record = twenty.create_pipeline_record(
             name=f"Follow-up: {email}",
-            stage="NEW",
-            contact_id=person_id,
+            bison_inbox_id=lead.bison_inbox_id or "",
+            person_id=person_id,
         )
-        opp_id = opportunity.get("id", "")
-        lead.twenty_opportunity_id = opp_id
+        record_id = pipeline_record.get("id", "")
+        lead.twenty_opportunity_id = record_id
         db.commit()
 
         twenty.create_note(
             "Positive sentiment detected — lead created from Bison reply.",
             contact_ids=[person_id] if person_id else None,
-            opportunity_id=opp_id,
+            pipeline_record_id=record_id,
         )
 
         log_action(db, "crm_records_created",
-                   f"Twenty CRM person={person_id}, opportunity={opp_id}",
+                   f"Twenty CRM person={person_id}, pipeline_record={record_id}",
                    lead_id=lead.id)
 
     except Exception as e:
@@ -279,12 +279,12 @@ def _handle_new_lead(db: Session, email: str, lead_data: dict, payload: dict) ->
 
 @app.post("/webhook/twenty")
 async def webhook_twenty(request: Request, db: Session = Depends(get_db)):
-    """Handle opportunity.updated events from Twenty CRM.
+    """Handle goapNewPipeline update events from Twenty CRM.
 
-    When user sets lead_magnet_url and moves to 'Ready to Send':
+    When user sets leadMagnetUrl and moves campaignStatus to READY_TO_SEND:
     1. Attach the lead to the follow-up campaign in Bison
     2. Update local DB status
-    3. Bison handles the 3-6-9 day follow-up sequence automatically
+    3. Bison handles the follow-up sequence automatically
     """
     body_bytes = await request.body()
 
@@ -303,27 +303,35 @@ async def webhook_twenty(request: Request, db: Session = Depends(get_db)):
     event = payload.get("event", "")
     data = payload.get("data", {})
 
-    log_action(db, "twenty_webhook_received", f"Event: {event}")
+    log_action(db, "twenty_webhook_received",
+               f"Event: {event} | Keys: {list(payload.keys())} | Data keys: {list(data.keys())}")
 
-    if event != "opportunity.updated":
+    # Accept goapNewPipeline update events (exact event name may vary)
+    valid_events = {"goapNewPipeline.updated", "goapNewPipelines.updated",
+                    "goap_new_pipeline.updated"}
+    if event not in valid_events:
         return {"status": "ignored", "event": event}
 
-    # Check if this update sets lead_magnet_url AND moves to Ready to Send
-    custom_fields = data.get("customFields", {})
-    magnet_url = custom_fields.get("lead_magnet_url", "")
-    status = custom_fields.get("campaign_status", "")
+    # Fields are top-level on the custom object, not nested in customFields
+    campaign_status = data.get("campaignStatus", "")
+    lead_magnet_url_field = data.get("leadMagnetUrl", {})
+    # leadMagnetUrl is LINKS type: {"primaryLinkUrl": "...", "primaryLinkLabel": "..."}
+    if isinstance(lead_magnet_url_field, dict):
+        magnet_url = lead_magnet_url_field.get("primaryLinkUrl", "")
+    else:
+        magnet_url = str(lead_magnet_url_field) if lead_magnet_url_field else ""
 
-    if not magnet_url or status != "Ready to Send":
-        return {"status": "ignored", "reason": "not a ready_to_send update"}
+    if not magnet_url or campaign_status != "READY_TO_SEND":
+        return {"status": "ignored", "reason": "not a READY_TO_SEND update"}
 
-    opportunity_id = data.get("id", "")
-    lead = db.query(Lead).filter(Lead.twenty_opportunity_id == opportunity_id).first()
+    record_id = data.get("id", "")
+    lead = db.query(Lead).filter(Lead.twenty_opportunity_id == record_id).first()
 
     if not lead:
         log_action(db, "webhook_ignored",
-                   f"Opportunity {opportunity_id} not found in local DB",
+                   f"Pipeline record {record_id} not found in local DB",
                    level="warning")
-        return {"status": "not_found", "opportunity_id": opportunity_id}
+        return {"status": "not_found", "record_id": record_id}
 
     # Update lead magnet URL in local DB
     lead.lead_magnet_url = magnet_url
@@ -358,20 +366,18 @@ async def webhook_twenty(request: Request, db: Session = Depends(get_db)):
                f"Lead magnet URL: {magnet_url}",
                lead_id=lead.id)
 
-    # Update Twenty CRM
+    # Update Twenty CRM pipeline record
     try:
-        twenty.update_opportunity(
-            opportunity_id,
-            customFields={
-                "campaign_status": "Lead Magnet Sent",
-                "last_contact_date": now.isoformat(),
-            },
+        twenty.update_pipeline_record(
+            record_id,
+            campaignStatus="LEAD_MAGNET_SENT",
+            lastContactDate=now.isoformat(),
         )
         twenty.create_note(
             f"Lead magnet sent. Follow-up sequence activated in Bison "
             f"(campaign {campaign_id}). URL: {magnet_url}.",
             contact_ids=[lead.twenty_contact_id] if lead.twenty_contact_id else None,
-            opportunity_id=opportunity_id,
+            pipeline_record_id=record_id,
         )
     except Exception as e:
         log_action(db, "crm_update_failed", str(e), lead_id=lead.id, level="error")

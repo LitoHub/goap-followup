@@ -15,7 +15,13 @@ BACKOFF_BASE = 2  # seconds
 
 
 class TwentyCRMClient:
-    """REST API client for Twenty CRM."""
+    """REST API client for Twenty CRM.
+
+    Uses two objects:
+    - /rest/people — standard People object for contacts
+    - /rest/goapNewPipelines — custom object "GOAP NEW PIPELINE" for tracking
+      the follow-up state machine
+    """
 
     def __init__(self):
         self.base_url = config.TWENTY_BASE_URL.rstrip("/")
@@ -55,72 +61,83 @@ class TwentyCRMClient:
 
         raise Exception("Max retries exceeded for Twenty CRM API")
 
+    def _extract_data(self, result: dict | list | None) -> dict:
+        """Extract the actual record from Twenty's response wrapper."""
+        if isinstance(result, dict):
+            data = result.get("data", result)
+            if isinstance(data, dict):
+                # Response is {"data": {"createGoapNewPipeline": {...}}} or similar
+                for key, val in data.items():
+                    if isinstance(val, dict) and "id" in val:
+                        return val
+                return data
+        return result or {}
+
     # --- People ---
 
-    def create_person(self, email: str, first_name: str = "", last_name: str = "",
-                      custom_fields: dict | None = None) -> dict:
+    def create_person(self, email: str, first_name: str = "",
+                      last_name: str = "") -> dict:
         """Create a new person record in Twenty CRM."""
         payload: dict[str, Any] = {
             "name": {"firstName": first_name, "lastName": last_name},
             "emails": {"primaryEmail": email},
         }
-        if custom_fields:
-            payload["customFields"] = custom_fields
-
         result = self._request("POST", "/rest/people", json=payload)
-        logger.info(f"Created person in Twenty CRM: {email}")
-        return result
+        record = self._extract_data(result)
+        logger.info(f"Created person in Twenty CRM: {email} (id={record.get('id', '')})")
+        return record
 
-    def get_person_by_email(self, email: str) -> dict | None:
-        """Find a person by email address."""
-        params = {
-            "filter": f'{{"emails":{{"primaryEmail":{{"eq":"{email}"}}}}}}'
-        }
-        result = self._request("GET", "/rest/people", params=params)
-        records = result.get("data", result) if isinstance(result, dict) else result
-        if records and isinstance(records, list) and len(records) > 0:
-            return records[0]
-        return None
+    # --- GOAP Pipeline (custom object) ---
 
-    # --- Opportunities ---
+    def create_pipeline_record(self, name: str, bison_inbox_id: str = "",
+                               person_id: str = "") -> dict:
+        """Create a new record in the GOAP NEW PIPELINE custom object.
 
-    def create_opportunity(self, name: str, stage: str = "NEW",
-                           contact_id: str = "", custom_fields: dict | None = None) -> dict:
-        """Create a new opportunity in Twenty CRM."""
+        Fields:
+            campaignStatus: NEW, READY_TO_SEND, LEAD_MAGNET_SENT, etc.
+            bisonInboxId: sender email address from Bison
+            leadMagnetUrl: {primaryLinkUrl, primaryLinkLabel}
+            lastContactDate: ISO datetime
+            followUpCount: integer
+        """
         payload: dict[str, Any] = {
             "name": name,
-            "stage": stage,
+            "campaignStatus": "NEW",
+            "bisonInboxId": bison_inbox_id,
         }
-        if contact_id:
-            payload["pointOfContactId"] = contact_id
-        if custom_fields:
-            payload["customFields"] = custom_fields
+        result = self._request("POST", "/rest/goapNewPipelines", json=payload)
+        record = self._extract_data(result)
+        logger.info(f"Created GOAP pipeline record: {name} (id={record.get('id', '')})")
+        return record
 
-        result = self._request("POST", "/rest/opportunities", json=payload)
-        logger.info(f"Created opportunity in Twenty CRM: {name}")
-        return result
+    def update_pipeline_record(self, record_id: str, **fields) -> dict:
+        """Update a GOAP pipeline record.
 
-    def update_opportunity(self, opportunity_id: str, **fields) -> dict:
-        """Update an opportunity's fields."""
-        result = self._request("PATCH", f"/rest/opportunities/{opportunity_id}", json=fields)
-        logger.info(f"Updated opportunity {opportunity_id}")
-        return result
+        Common updates:
+            campaignStatus="LEAD_MAGNET_SENT"
+            lastContactDate="2026-01-01T00:00:00Z"
+            followUpCount=1
+        """
+        result = self._request("PATCH", f"/rest/goapNewPipelines/{record_id}", json=fields)
+        record = self._extract_data(result)
+        logger.info(f"Updated GOAP pipeline record {record_id}")
+        return record
 
     # --- Notes ---
 
     def create_note(self, body: str, contact_ids: list[str] | None = None,
-                    opportunity_id: str = "") -> dict:
-        """Create a note attached to a person and/or opportunity."""
+                    pipeline_record_id: str = "") -> dict:
+        """Create a note attached to a person and/or pipeline record."""
         payload: dict[str, Any] = {"body": body}
+        targets = []
         if contact_ids:
-            payload["noteTargets"] = [
-                {"personId": cid} for cid in contact_ids
-            ]
-        if opportunity_id:
-            if "noteTargets" not in payload:
-                payload["noteTargets"] = []
-            payload["noteTargets"].append({"opportunityId": opportunity_id})
+            targets.extend({"personId": cid} for cid in contact_ids)
+        if pipeline_record_id:
+            targets.append({"goapNewPipelineId": pipeline_record_id})
+        if targets:
+            payload["noteTargets"] = targets
 
         result = self._request("POST", "/rest/notes", json=payload)
-        logger.info(f"Created note in Twenty CRM")
-        return result
+        record = self._extract_data(result)
+        logger.info("Created note in Twenty CRM")
+        return record
