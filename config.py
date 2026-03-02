@@ -16,7 +16,10 @@ BISON_BASE_URL = os.getenv("BISON_BASE_URL", "https://dedi.emailbison.com")
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
 
 # Database
+# Railway provides postgres:// but SQLAlchemy requires postgresql://
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///.tmp/followup.db")
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
 # Scheduler
 SCHEDULER_INTERVAL_HOURS = int(os.getenv("SCHEDULER_INTERVAL_HOURS", "1"))
