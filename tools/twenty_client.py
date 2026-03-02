@@ -104,9 +104,8 @@ class TwentyCRMClient:
         payload: dict[str, Any] = {
             "name": name,
             "campaignStatus": "NEW",
+            "bisonInboxId": bison_inbox_id,
         }
-        if bison_inbox_id:
-            payload["bisonInboxId"] = bison_inbox_id
         result = self._request("POST", "/rest/goapNewPipelines", json=payload)
         record = self._extract_data(result)
         logger.info(f"Created GOAP pipeline record: {name} (id={record.get('id', '')})")
