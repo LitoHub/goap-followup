@@ -111,6 +111,21 @@ def get_leads(db: Session = Depends(get_db)):
     ]
 
 
+@app.get("/debug/test-pipeline")
+def debug_test_pipeline():
+    """Temporary debug endpoint to test pipeline record creation."""
+    import uuid
+    unique = str(uuid.uuid4())[:8]
+    try:
+        result = twenty.create_pipeline_record(
+            name=f"Debug Test {unique}",
+            bison_inbox_id="debug@test.com",
+        )
+        return {"status": "ok", "result": result}
+    except Exception as e:
+        return {"status": "error", "detail": str(e)}
+
+
 # --- Bison Webhook ---
 
 @app.post("/webhook/bison")
