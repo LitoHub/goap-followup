@@ -111,29 +111,12 @@ def get_leads(db: Session = Depends(get_db)):
     ]
 
 
-@app.get("/debug/note-fields")
-def debug_note_fields():
-    """Check what fields the Note object has in Twenty CRM."""
+@app.get("/debug/notes")
+def debug_notes():
+    """List notes in Twenty CRM to see field structure."""
     try:
-        # Get all objects to find note's metadata ID
-        objects = twenty._request("GET", "/rest/metadata/objects")
-        note_obj = None
-        if isinstance(objects, dict):
-            for obj in objects.get("data", {}).get("objects", []):
-                if obj.get("nameSingular") == "note":
-                    note_obj = obj
-                    break
-        if not note_obj:
-            return {"error": "Note object not found", "objects": [o.get("nameSingular") for o in objects.get("data", {}).get("objects", [])]}
-
-        obj_id = note_obj["id"]
-        fields = twenty._request("GET", "/rest/metadata/fields")
-        field_names = []
-        if isinstance(fields, dict):
-            for f in fields.get("data", {}).get("fields", []):
-                if f.get("objectMetadataId") == obj_id:
-                    field_names.append({"name": f.get("name"), "type": f.get("type"), "label": f.get("label")})
-        return {"note_object_id": obj_id, "fields": field_names}
+        result = twenty._request("GET", "/rest/notes?limit=3")
+        return result
     except Exception as e:
         return {"error": str(e)}
 
