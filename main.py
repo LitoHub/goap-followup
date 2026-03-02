@@ -111,18 +111,6 @@ def get_leads(db: Session = Depends(get_db)):
     ]
 
 
-@app.patch("/debug/lead/{lead_id}/status")
-def debug_update_status(lead_id: int, status: str = "",
-                        db: Session = Depends(get_db)):
-    """Temporary: update a lead's campaign_status for testing."""
-    lead = db.query(Lead).filter(Lead.id == lead_id).first()
-    if not lead:
-        raise HTTPException(status_code=404, detail="Lead not found")
-    if status:
-        lead.campaign_status = status
-        db.commit()
-    return {"lead_id": lead.id, "campaign_status": lead.campaign_status}
-
 
 # --- Bison Webhook ---
 
