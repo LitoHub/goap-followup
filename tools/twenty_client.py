@@ -128,22 +128,16 @@ class TwentyCRMClient:
 
     def create_note(self, text: str, contact_ids: list[str] | None = None,
                     pipeline_record_id: str = "") -> dict:
-        """Create a note attached to a person and/or pipeline record.
+        """Create a note in Twenty CRM.
 
         Twenty CRM notes use 'title' for the heading and 'bodyV2' with
-        'markdown' for rich content.
+        'markdown' for rich content. noteTargets is a one-to-many
+        relation that can't be set inline on creation.
         """
         payload: dict[str, Any] = {
             "title": text,
             "bodyV2": {"blocknote": None, "markdown": text},
         }
-        targets = []
-        if contact_ids:
-            targets.extend({"personId": cid} for cid in contact_ids)
-        if pipeline_record_id:
-            targets.append({"goapNewPipelineId": pipeline_record_id})
-        if targets:
-            payload["noteTargets"] = targets
 
         result = self._request("POST", "/rest/notes", json=payload)
         record = self._extract_data(result)
