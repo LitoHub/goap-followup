@@ -111,6 +111,19 @@ def get_leads(db: Session = Depends(get_db)):
     ]
 
 
+@app.patch("/debug/lead/{lead_id}/status")
+def debug_update_status(lead_id: int, status: str = "",
+                        db: Session = Depends(get_db)):
+    """Temporary: update a lead's campaign_status for testing."""
+    lead = db.query(Lead).filter(Lead.id == lead_id).first()
+    if not lead:
+        raise HTTPException(status_code=404, detail="Lead not found")
+    if status:
+        lead.campaign_status = status
+        db.commit()
+    return {"lead_id": lead.id, "campaign_status": lead.campaign_status}
+
+
 # --- Bison Webhook ---
 
 @app.post("/webhook/bison")
@@ -218,7 +231,9 @@ def _handle_new_lead(db: Session, email: str, lead_data: dict, payload: dict) ->
         or payload.get("sender_email", "")
         or payload.get("inbox_id", "")
     )
-    first_name = lead_data.get("first_name", "") or lead_data.get("lead_name", "").split()[0] if lead_data.get("lead_name") else ""
+    first_name = lead_data.get("first_name", "")
+    if not first_name and lead_data.get("lead_name"):
+        first_name = lead_data["lead_name"].split()[0]
     last_name = lead_data.get("last_name", "")
 
     # Create lead in local DB
