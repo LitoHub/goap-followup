@@ -127,11 +127,12 @@ def debug_note_fields():
             return {"error": "Note object not found", "objects": [o.get("nameSingular") for o in objects.get("data", {}).get("objects", [])]}
 
         obj_id = note_obj["id"]
-        fields = twenty._request("GET", f"/rest/metadata/fields?filter=objectMetadataId[eq]={obj_id}")
+        fields = twenty._request("GET", "/rest/metadata/fields")
         field_names = []
         if isinstance(fields, dict):
             for f in fields.get("data", {}).get("fields", []):
-                field_names.append({"name": f.get("name"), "type": f.get("type"), "label": f.get("label")})
+                if f.get("objectMetadataId") == obj_id:
+                    field_names.append({"name": f.get("name"), "type": f.get("type"), "label": f.get("label")})
         return {"note_object_id": obj_id, "fields": field_names}
     except Exception as e:
         return {"error": str(e)}
