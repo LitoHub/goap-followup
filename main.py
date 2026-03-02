@@ -111,16 +111,6 @@ def get_leads(db: Session = Depends(get_db)):
     ]
 
 
-@app.get("/debug/notes")
-def debug_notes():
-    """List notes in Twenty CRM to see field structure."""
-    try:
-        result = twenty._request("GET", "/rest/notes?limit=3")
-        return result
-    except Exception as e:
-        return {"error": str(e)}
-
-
 # --- Bison Webhook ---
 
 @app.post("/webhook/bison")

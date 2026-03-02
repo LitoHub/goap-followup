@@ -126,10 +126,17 @@ class TwentyCRMClient:
 
     # --- Notes ---
 
-    def create_note(self, body: str, contact_ids: list[str] | None = None,
+    def create_note(self, text: str, contact_ids: list[str] | None = None,
                     pipeline_record_id: str = "") -> dict:
-        """Create a note attached to a person and/or pipeline record."""
-        payload: dict[str, Any] = {"body": body}
+        """Create a note attached to a person and/or pipeline record.
+
+        Twenty CRM notes use 'title' for the heading and 'bodyV2' with
+        'markdown' for rich content.
+        """
+        payload: dict[str, Any] = {
+            "title": text,
+            "bodyV2": {"blocknote": None, "markdown": text},
+        }
         targets = []
         if contact_ids:
             targets.extend({"personId": cid} for cid in contact_ids)
