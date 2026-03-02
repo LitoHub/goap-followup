@@ -246,19 +246,14 @@ def _handle_new_lead(db: Session, email: str, lead_data: dict, payload: dict) ->
             email=email,
             first_name=lead.first_name or "",
             last_name=lead.last_name or "",
-            custom_fields={"bison_inbox_id": str(inbox_id)},
         )
         person_id = person.get("id", "")
         lead.twenty_contact_id = person_id
 
         opportunity = twenty.create_opportunity(
             name=f"Follow-up: {email}",
-            stage="LEAD",
+            stage="NEW",
             contact_id=person_id,
-            custom_fields={
-                "campaign_status": "New",
-                "bison_inbox_id": str(inbox_id),
-            },
         )
         opp_id = opportunity.get("id", "")
         lead.twenty_opportunity_id = opp_id
