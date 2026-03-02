@@ -1,0 +1,26 @@
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# Twenty CRM
+TWENTY_API_KEY = os.getenv("TWENTY_API_KEY", "")
+TWENTY_BASE_URL = os.getenv("TWENTY_BASE_URL", "https://api.twenty.com")
+TWENTY_WEBHOOK_SECRET = os.getenv("TWENTY_WEBHOOK_SECRET", "")
+
+# Bison (EmailBison)
+BISON_API_KEY = os.getenv("BISON_API_KEY", "")
+BISON_BASE_URL = os.getenv("BISON_BASE_URL", "https://dedi.emailbison.com")
+
+# Google Gemini (sentiment analysis)
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
+
+# Database
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///.tmp/followup.db")
+
+# Scheduler
+SCHEDULER_INTERVAL_HOURS = int(os.getenv("SCHEDULER_INTERVAL_HOURS", "1"))
+FOLLOWUP_DELAY_DAYS = int(os.getenv("FOLLOWUP_DELAY_DAYS", "3"))
+
+# Logging
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")

@@ -1,0 +1,26 @@
+# Environment and secrets
+.env
+credentials.json
+token.json
+
+# Temporary files
+.tmp/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# OS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+
+# MCP config (contains session tokens)
+.mcp.json
+
+# Backup files
+CLAUDE copy.md
