@@ -107,11 +107,22 @@ class TwentyCRMClient:
 
     def find_or_create_person(self, email: str, first_name: str = "",
                               last_name: str = "") -> dict:
-        """Find existing person by email, or create a new one."""
+        """Find existing person by email, or create a new one.
+
+        Handles Twenty CRM soft-deletes: if creation fails with 'duplicate entry',
+        the person exists but may be soft-deleted and invisible to filters.
+        In that case, proceed without a person ID.
+        """
         existing = self.find_person_by_email(email)
         if existing:
             return existing
-        return self.create_person(email, first_name, last_name)
+        try:
+            return self.create_person(email, first_name, last_name)
+        except Exception as e:
+            if "duplicate" in str(e).lower():
+                logger.warning(f"Person {email} exists (soft-deleted?) but can't be found. Proceeding without person link.")
+                return {"id": "", "_soft_deleted": True}
+            raise
 
     # --- GOAP Pipeline (custom object) ---
 
