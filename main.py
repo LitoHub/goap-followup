@@ -444,6 +444,10 @@ async def webhook_twenty(request: Request, db: Session = Depends(get_db)):
     else:
         magnet_url = str(lead_magnet_url_field) if lead_magnet_url_field else ""
 
+    log_action(db, "twenty_webhook_fields",
+               f"campaignStatus={campaign_status!r} | leadMagnetUrl={lead_magnet_url_field!r} | "
+               f"magnet_url={magnet_url!r} | record_id={data.get('id', '')}")
+
     if not magnet_url or campaign_status != "READY_TO_SEND":
         return {"status": "ignored", "reason": "not a READY_TO_SEND update"}
 
