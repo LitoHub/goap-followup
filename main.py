@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import json
 import logging
+import re
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
@@ -23,6 +24,21 @@ logger = logging.getLogger(__name__)
 
 twenty = TwentyCRMClient()
 bison = BisonClient()
+
+
+def _strip_html(text: str) -> str:
+    """Remove HTML tags and decode entities to get plain text."""
+    if not text:
+        return ""
+    clean = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)
+    clean = re.sub(r"<[^>]+>", " ", clean)
+    clean = re.sub(r"&nbsp;", " ", clean)
+    clean = re.sub(r"&amp;", "&", clean)
+    clean = re.sub(r"&lt;", "<", clean)
+    clean = re.sub(r"&gt;", ">", clean)
+    clean = re.sub(r"&#\d+;", "", clean)
+    clean = re.sub(r"\s+", " ", clean).strip()
+    return clean
 
 
 def log_action(db: Session, action: str, details: str = "",
@@ -279,16 +295,18 @@ def _handle_existing_lead_reply(db: Session, lead: Lead, lead_data: dict) -> dic
 
 def _handle_new_lead(db: Session, email: str, lead_data: dict, payload: dict) -> dict:
     """Analyze sentiment and create lead in DB + CRM if positive."""
-    reply_text = (
+    reply_text_raw = (
         lead_data.get("reply_text", "")
         or lead_data.get("body", "")
         or lead_data.get("reply_body", "")
         or payload.get("reply_text", "")
         or payload.get("body", "")
     )
+    reply_text = _strip_html(reply_text_raw)
 
     sentiment = analyze_sentiment(reply_text)
-    log_action(db, "sentiment_analyzed", f"Lead {email} classified as {sentiment}")
+    log_action(db, "sentiment_analyzed",
+               f"Lead {email} classified as {sentiment} | Reply text: {reply_text[:300]}")
 
     if sentiment == "negative":
         return {"status": "negative_sentiment", "email": email}
