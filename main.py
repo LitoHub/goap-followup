@@ -113,6 +113,19 @@ def get_leads(db: Session = Depends(get_db)):
     ]
 
 
+@app.delete("/leads/{lead_id}")
+def delete_lead(lead_id: int, db: Session = Depends(get_db)):
+    """Temp debug endpoint: delete a lead and its related records."""
+    lead = db.query(Lead).filter(Lead.id == lead_id).first()
+    if not lead:
+        raise HTTPException(status_code=404, detail="Lead not found")
+    db.query(SystemLog).filter(SystemLog.lead_id == lead_id).delete()
+    from models import ScheduledTask
+    db.query(ScheduledTask).filter(ScheduledTask.lead_id == lead_id).delete()
+    db.delete(lead)
+    db.commit()
+    return {"status": "deleted", "lead_id": lead_id}
+
 
 # --- Bison Webhook ---
 
