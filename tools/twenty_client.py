@@ -112,7 +112,8 @@ class TwentyCRMClient:
 
     def create_pipeline_record(self, name: str, bison_inbox_id: str = "",
                                person_id: str = "",
-                               lead_reply: str = "") -> dict:
+                               lead_reply: str = "",
+                               lead_email: str = "") -> dict:
         """Create a new record in the GOAP NEW PIPELINE custom object."""
         payload: dict[str, Any] = {
             "name": name,
@@ -121,6 +122,8 @@ class TwentyCRMClient:
         }
         if lead_reply:
             payload["leadReply"] = lead_reply
+        if lead_email:
+            payload["leadEmail"] = lead_email
         result = self._request("POST", "/rest/goapNewPipelines", json=payload)
         record = self._extract_data(result)
         logger.info(f"Created GOAP pipeline record: {name} (id={record.get('id', '')})")

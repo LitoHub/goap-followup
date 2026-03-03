@@ -375,6 +375,7 @@ def _handle_new_lead(db: Session, email: str, lead_data: dict, payload: dict) ->
             bison_inbox_id=lead.bison_inbox_id or "",
             person_id=person_id,
             lead_reply=reply_text,
+            lead_email=email,
         )
         record_id = pipeline_record.get("id", "")
         lead.twenty_opportunity_id = record_id
