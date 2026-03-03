@@ -393,7 +393,12 @@ def _handle_new_lead(db: Session, email: str, lead_data: dict, payload: dict) ->
                    lead_id=lead.id)
 
     except Exception as e:
-        log_action(db, "crm_creation_failed", str(e), lead_id=lead.id, level="error")
+        logger.exception(f"CRM creation failed for {email}: {e}")
+        try:
+            db.rollback()
+            log_action(db, "crm_creation_failed", str(e)[:500], lead_id=lead.id, level="error")
+        except Exception:
+            logger.error("Failed to log CRM creation error to DB")
 
     return {"status": "lead_created", "lead_id": lead.id, "email": email}
 

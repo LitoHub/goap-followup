@@ -78,14 +78,19 @@ class TwentyCRMClient:
 
     def find_person_by_email(self, email: str) -> dict | None:
         """Search for an existing person by email. Returns the person dict or None."""
+        from urllib.parse import quote
+        safe_email = quote(email, safe="")
         result = self._request(
             "GET",
-            f"/rest/people?filter[emails][primaryEmail][eq]={email}&limit=1",
+            f"/rest/people?filter=emails.primaryEmail[eq]:{safe_email}&limit=5",
         )
         records = result if isinstance(result, list) else (result or {}).get("data", {}).get("people", [])
-        if records and isinstance(records, list) and len(records) > 0:
-            logger.info(f"Found existing person for {email}: {records[0].get('id', '')}")
-            return records[0]
+        if records and isinstance(records, list):
+            for person in records:
+                person_email = person.get("emails", {}).get("primaryEmail", "")
+                if person_email.lower() == email.lower():
+                    logger.info(f"Found existing person for {email}: {person.get('id', '')}")
+                    return person
         return None
 
     def create_person(self, email: str, first_name: str = "",
