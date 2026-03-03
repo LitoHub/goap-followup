@@ -150,12 +150,40 @@ async def webhook_bison(request: Request, db: Session = Depends(get_db)):
     else:
         event_type = raw_event or payload.get("type", "unknown")
 
-    # Extract lead data from the 'data' key
-    lead_data = payload.get("data", payload.get("lead", payload))
+    # Extract data container from the 'data' key
+    raw_data = payload.get("data", payload)
 
-    # Log full payload structure for debugging
+    # Bison sends nested objects: data.lead, data.reply, data.campaign, data.sender_email
+    # Flatten into a single dict for easier extraction
+    lead_obj = raw_data.get("lead", {}) if isinstance(raw_data, dict) else {}
+    reply_obj = raw_data.get("reply", {}) if isinstance(raw_data, dict) else {}
+    campaign_obj = raw_data.get("campaign", {}) if isinstance(raw_data, dict) else {}
+    sender_obj = raw_data.get("sender_email", {}) if isinstance(raw_data, dict) else {}
+
+    # Build a unified lead_data dict from nested + flat fields
+    lead_data = {}
+    if isinstance(raw_data, dict):
+        # Copy flat fields first (old format)
+        for k, v in raw_data.items():
+            if not isinstance(v, (dict, list)):
+                lead_data[k] = v
+        # Overlay nested fields (new format)
+        if lead_obj and isinstance(lead_obj, dict):
+            lead_data.update(lead_obj)
+        if reply_obj and isinstance(reply_obj, dict):
+            for k, v in reply_obj.items():
+                if k not in lead_data or not lead_data[k]:
+                    lead_data[f"reply_{k}"] = v
+            # Also store reply fields directly
+            lead_data["reply_id"] = reply_obj.get("id", "")
+            lead_data["reply_text"] = reply_obj.get("body", "") or reply_obj.get("text", "")
+        if sender_obj and isinstance(sender_obj, dict):
+            lead_data["sender_email"] = sender_obj.get("email", "") or sender_obj.get("email_address", "")
+            lead_data["sender_email_id"] = sender_obj.get("id", "")
+
     log_action(db, "bison_webhook_received",
-               f"Event: {event_type} | Data keys: {list(lead_data.keys()) if isinstance(lead_data, dict) else 'N/A'}")
+               f"Event: {event_type} | Data keys: {list(raw_data.keys()) if isinstance(raw_data, dict) else 'N/A'} | "
+               f"Lead: {json.dumps({k: v for k, v in lead_data.items() if not isinstance(v, (dict, list))}, default=str)[:500]}")
     logger.info(f"Bison webhook received: event={event_type}")
 
     # Only process LEAD_INTERESTED and LEAD_REPLIED events
@@ -165,45 +193,34 @@ async def webhook_bison(request: Request, db: Session = Depends(get_db)):
         return {"status": "ignored", "event": event_type}
 
     # Only process replies from our outbound campaign.
-    # Bison uses integer IDs in webhooks but UUIDs in the UI.
-    # BISON_OUTBOUND_CAMPAIGN_ID can be set to either format (or comma-separated).
     allowed_ids = set()
     if config.BISON_OUTBOUND_CAMPAIGN_ID:
         for cid in config.BISON_OUTBOUND_CAMPAIGN_ID.split(","):
             allowed_ids.add(cid.strip())
 
-    # Search for campaign_id in multiple possible locations
+    # Extract campaign ID from nested campaign object or flat fields
     campaign_id = (
         lead_data.get("campaign_id")
         or lead_data.get("campaignId")
-        or lead_data.get("campaign_uuid")
-        or payload.get("campaign_id")
     )
-    if not campaign_id and isinstance(lead_data.get("campaign"), dict):
+    if not campaign_id and isinstance(campaign_obj, dict):
         campaign_id = (
-            lead_data["campaign"].get("id")
-            or lead_data["campaign"].get("uuid")
+            campaign_obj.get("id")
+            or campaign_obj.get("uuid")
         )
     campaign_id_str = str(campaign_id) if campaign_id else ""
 
     if allowed_ids and campaign_id_str not in allowed_ids:
-        # Log full data structure so we can discover the right field
-        data_summary = {}
-        if isinstance(lead_data, dict):
-            for k, v in lead_data.items():
-                if isinstance(v, (dict, list)):
-                    data_summary[k] = f"({type(v).__name__})"
-                else:
-                    data_summary[k] = v
         log_action(db, "bison_webhook_ignored",
-                   f"Campaign mismatch. found={campaign_id}. allowed={allowed_ids}. "
-                   f"Data: {json.dumps(data_summary, default=str)[:800]}")
+                   f"Campaign mismatch. found={campaign_id}. allowed={allowed_ids}.",
+                   level="info")
         return {"status": "ignored", "reason": "wrong_campaign"}
 
+    # Extract email from lead object or flat fields
     lead_email = (
-        lead_data.get("lead_email", "")
-        or lead_data.get("email", "")
-        or payload.get("email", "")
+        lead_data.get("email", "")
+        or lead_data.get("lead_email", "")
+        or lead_data.get("email_address", "")
     )
     if isinstance(lead_email, str):
         lead_email = lead_email.strip().lower()
@@ -212,7 +229,7 @@ async def webhook_bison(request: Request, db: Session = Depends(get_db)):
 
     if not lead_email:
         log_action(db, "bison_webhook_ignored",
-                   f"No email found in payload. Keys: {list(payload.keys())}",
+                   f"No email found. Lead keys: {list(lead_data.keys())[:20]}",
                    level="warning")
         return {"status": "ignored", "reason": "no_email"}
 
@@ -265,6 +282,7 @@ def _handle_new_lead(db: Session, email: str, lead_data: dict, payload: dict) ->
     reply_text = (
         lead_data.get("reply_text", "")
         or lead_data.get("body", "")
+        or lead_data.get("reply_body", "")
         or payload.get("reply_text", "")
         or payload.get("body", "")
     )
