@@ -123,7 +123,7 @@ class TwentyCRMClient:
         if lead_reply:
             payload["leadReply"] = lead_reply
         if lead_email:
-            payload["leadEmail"] = lead_email
+            payload["leadEmail"] = {"primaryEmail": lead_email}
         result = self._request("POST", "/rest/goapNewPipelines", json=payload)
         record = self._extract_data(result)
         logger.info(f"Created GOAP pipeline record: {name} (id={record.get('id', '')})")
