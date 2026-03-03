@@ -366,7 +366,7 @@ def _handle_new_lead(db: Session, email: str, lead_data: dict, payload: dict) ->
             first_name=lead.first_name or "",
             last_name=lead.last_name or "",
         )
-        person_id = person.get("id", "")
+        person_id = person.get("id", "") or None
         lead.twenty_contact_id = person_id
 
         lead_full_name = f"{lead.first_name or ''} {lead.last_name or ''}".strip() or email
@@ -377,7 +377,7 @@ def _handle_new_lead(db: Session, email: str, lead_data: dict, payload: dict) ->
             lead_reply=reply_text,
             lead_email=email,
         )
-        record_id = pipeline_record.get("id", "")
+        record_id = pipeline_record.get("id", "") or None
         lead.twenty_opportunity_id = record_id
         db.commit()
 
