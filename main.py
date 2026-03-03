@@ -192,7 +192,7 @@ async def webhook_bison(request: Request, db: Session = Depends(get_db)):
                     lead_data[f"reply_{k}"] = v
             # Also store reply fields directly
             lead_data["reply_id"] = reply_obj.get("id", "")
-            lead_data["reply_text"] = reply_obj.get("body", "") or reply_obj.get("text", "")
+            lead_data["reply_text"] = reply_obj.get("text", "") or reply_obj.get("text_body", "") or reply_obj.get("body", "")
         if sender_obj and isinstance(sender_obj, dict):
             lead_data["sender_email"] = sender_obj.get("email", "") or sender_obj.get("email_address", "")
             lead_data["sender_email_id"] = sender_obj.get("id", "")
