@@ -325,7 +325,7 @@ def _handle_new_lead(db: Session, email: str, lead_data: dict, payload: dict) ->
 
     # Create in Twenty CRM
     try:
-        person = twenty.create_person(
+        person = twenty.find_or_create_person(
             email=email,
             first_name=lead.first_name or "",
             last_name=lead.last_name or "",

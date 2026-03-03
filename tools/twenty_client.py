@@ -76,6 +76,18 @@ class TwentyCRMClient:
 
     # --- People ---
 
+    def find_person_by_email(self, email: str) -> dict | None:
+        """Search for an existing person by email. Returns the person dict or None."""
+        result = self._request(
+            "GET",
+            f"/rest/people?filter[emails][primaryEmail][eq]={email}&limit=1",
+        )
+        records = result if isinstance(result, list) else (result or {}).get("data", {}).get("people", [])
+        if records and isinstance(records, list) and len(records) > 0:
+            logger.info(f"Found existing person for {email}: {records[0].get('id', '')}")
+            return records[0]
+        return None
+
     def create_person(self, email: str, first_name: str = "",
                       last_name: str = "") -> dict:
         """Create a new person record in Twenty CRM."""
@@ -87,6 +99,14 @@ class TwentyCRMClient:
         record = self._extract_data(result)
         logger.info(f"Created person in Twenty CRM: {email} (id={record.get('id', '')})")
         return record
+
+    def find_or_create_person(self, email: str, first_name: str = "",
+                              last_name: str = "") -> dict:
+        """Find existing person by email, or create a new one."""
+        existing = self.find_person_by_email(email)
+        if existing:
+            return existing
+        return self.create_person(email, first_name, last_name)
 
     # --- GOAP Pipeline (custom object) ---
 
