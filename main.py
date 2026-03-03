@@ -386,19 +386,20 @@ async def webhook_twenty(request: Request, db: Session = Depends(get_db)):
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON payload")
 
-    event = payload.get("event", "")
-    data = payload.get("data", {})
+    # Twenty CRM sends eventName (not event) and record (not data)
+    event = payload.get("eventName", "") or payload.get("event", "")
+    data = payload.get("record", {}) or payload.get("data", {})
 
     log_action(db, "twenty_webhook_received",
-               f"Event: {event} | Keys: {list(payload.keys())} | Data keys: {list(data.keys())}")
+               f"Event: {event} | Keys: {list(payload.keys())} | Record keys: {list(data.keys()) if isinstance(data, dict) else 'N/A'}")
 
-    # Accept goapNewPipeline update events (exact event name may vary)
+    # Accept goapNewPipeline update events
     valid_events = {"goapNewPipeline.updated", "goapNewPipelines.updated",
                     "goap_new_pipeline.updated"}
     if event not in valid_events:
         return {"status": "ignored", "event": event}
 
-    # Fields are top-level on the custom object, not nested in customFields
+    # Fields are top-level on the record
     campaign_status = data.get("campaignStatus", "")
     lead_magnet_url_field = data.get("leadMagnetUrl", {})
     # leadMagnetUrl is LINKS type: {"primaryLinkUrl": "...", "primaryLinkLabel": "..."}
