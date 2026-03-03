@@ -148,18 +148,36 @@ class TwentyCRMClient:
 
     def create_note(self, text: str, contact_ids: list[str] | None = None,
                     pipeline_record_id: str = "") -> dict:
-        """Create a note in Twenty CRM.
-
-        Twenty CRM notes use 'title' for the heading and 'bodyV2' with
-        'markdown' for rich content. noteTargets is a one-to-many
-        relation that can't be set inline on creation.
-        """
+        """Create a note and link it to person/pipeline record via noteTargets."""
         payload: dict[str, Any] = {
-            "title": text,
+            "title": text[:255] if len(text) > 255 else text,
             "bodyV2": {"blocknote": None, "markdown": text},
         }
 
         result = self._request("POST", "/rest/notes", json=payload)
         record = self._extract_data(result)
-        logger.info("Created note in Twenty CRM")
+        note_id = record.get("id", "")
+        logger.info(f"Created note in Twenty CRM: {note_id}")
+
+        # Link note to person(s) and/or pipeline record via noteTargets
+        if note_id:
+            targets = []
+            if contact_ids:
+                for pid in contact_ids:
+                    if pid:
+                        targets.append(("person", pid))
+            if pipeline_record_id:
+                targets.append(("goapNewPipeline", pipeline_record_id))
+
+            for target_type, target_id in targets:
+                try:
+                    self._request("POST", "/rest/noteTargets", json={
+                        "noteId": note_id,
+                        "targetObjectNameSingular": target_type,
+                        "targetObjectRecordId": target_id,
+                    })
+                    logger.info(f"Linked note {note_id} to {target_type} {target_id}")
+                except Exception as e:
+                    logger.warning(f"Failed to link note to {target_type} {target_id}: {e}")
+
         return record
