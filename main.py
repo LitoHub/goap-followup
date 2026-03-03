@@ -129,30 +129,62 @@ async def webhook_bison(request: Request, db: Session = Depends(get_db)):
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON payload")
 
-    # Log raw payload for debugging
-    event_type = payload.get("event", payload.get("type", "unknown"))
+    # Bison sends event as a dict: {"type": "LEAD_INTERESTED", "name": "...", ...}
+    # or as a string for older formats
+    raw_event = payload.get("event", "")
+    if isinstance(raw_event, dict):
+        event_type = raw_event.get("type", raw_event.get("name", "unknown"))
+    else:
+        event_type = raw_event or payload.get("type", "unknown")
+
+    # Extract lead data from the 'data' key
+    lead_data = payload.get("data", payload.get("lead", payload))
+
+    # Log full payload structure for debugging
     log_action(db, "bison_webhook_received",
-               f"Event: {event_type} | Keys: {list(payload.keys())}")
+               f"Event: {event_type} | Data keys: {list(lead_data.keys()) if isinstance(lead_data, dict) else 'N/A'}")
     logger.info(f"Bison webhook received: event={event_type}")
 
-    # Extract lead data — Bison webhook payloads vary by event.
-    lead_data = payload.get("data", payload.get("lead", payload))
+    # Only process LEAD_INTERESTED and LEAD_REPLIED events
+    valid_events = {"LEAD_INTERESTED", "LEAD_REPLIED",
+                    "contact_interested", "contact_replied"}
+    if event_type not in valid_events:
+        return {"status": "ignored", "event": event_type}
 
     # Only process replies from our outbound campaign
     campaign_id = (
         lead_data.get("campaign_id")
+        or lead_data.get("campaignId")
         or payload.get("campaign_id")
     )
-    if config.BISON_OUTBOUND_CAMPAIGN_ID and str(campaign_id) != config.BISON_OUTBOUND_CAMPAIGN_ID:
+    # Convert to string for comparison; also try nested campaign object
+    if not campaign_id and isinstance(lead_data.get("campaign"), dict):
+        campaign_id = lead_data["campaign"].get("id")
+    campaign_id_str = str(campaign_id) if campaign_id else ""
+
+    if config.BISON_OUTBOUND_CAMPAIGN_ID and campaign_id_str != config.BISON_OUTBOUND_CAMPAIGN_ID:
+        # Log full data structure so we can find the campaign_id field
+        data_summary = {}
+        if isinstance(lead_data, dict):
+            for k, v in lead_data.items():
+                if isinstance(v, (dict, list)):
+                    data_summary[k] = f"({type(v).__name__})"
+                else:
+                    data_summary[k] = v
         log_action(db, "bison_webhook_ignored",
-                   f"Campaign {campaign_id} doesn't match outbound campaign "
-                   f"{config.BISON_OUTBOUND_CAMPAIGN_ID}")
+                   f"Campaign mismatch. campaign_id={campaign_id}. "
+                   f"Full data: {json.dumps(data_summary, default=str)[:800]}")
         return {"status": "ignored", "reason": "wrong_campaign"}
+
     lead_email = (
         lead_data.get("lead_email", "")
         or lead_data.get("email", "")
         or payload.get("email", "")
-    ).strip().lower()
+    )
+    if isinstance(lead_email, str):
+        lead_email = lead_email.strip().lower()
+    else:
+        lead_email = ""
 
     if not lead_email:
         log_action(db, "bison_webhook_ignored",
