@@ -320,8 +320,9 @@ def _handle_new_lead(db: Session, email: str, lead_data: dict, payload: dict) ->
         person_id = person.get("id", "")
         lead.twenty_contact_id = person_id
 
+        lead_full_name = f"{lead.first_name or ''} {lead.last_name or ''}".strip() or email
         pipeline_record = twenty.create_pipeline_record(
-            name=f"Follow-up: {email}",
+            name=lead_full_name,
             bison_inbox_id=lead.bison_inbox_id or "",
             person_id=person_id,
         )
@@ -329,8 +330,9 @@ def _handle_new_lead(db: Session, email: str, lead_data: dict, payload: dict) ->
         lead.twenty_opportunity_id = record_id
         db.commit()
 
+        note_text = f"Lead replied: \"{reply_text}\"\n\nSentiment: {sentiment}. Created automatically from Bison."
         twenty.create_note(
-            "Positive sentiment detected — lead created from Bison reply.",
+            note_text,
             contact_ids=[person_id] if person_id else None,
             pipeline_record_id=record_id,
         )
