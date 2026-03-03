@@ -151,19 +151,30 @@ async def webhook_bison(request: Request, db: Session = Depends(get_db)):
     if event_type not in valid_events:
         return {"status": "ignored", "event": event_type}
 
-    # Only process replies from our outbound campaign
+    # Only process replies from our outbound campaign.
+    # Bison uses integer IDs in webhooks but UUIDs in the UI.
+    # BISON_OUTBOUND_CAMPAIGN_ID can be set to either format (or comma-separated).
+    allowed_ids = set()
+    if config.BISON_OUTBOUND_CAMPAIGN_ID:
+        for cid in config.BISON_OUTBOUND_CAMPAIGN_ID.split(","):
+            allowed_ids.add(cid.strip())
+
+    # Search for campaign_id in multiple possible locations
     campaign_id = (
         lead_data.get("campaign_id")
         or lead_data.get("campaignId")
+        or lead_data.get("campaign_uuid")
         or payload.get("campaign_id")
     )
-    # Convert to string for comparison; also try nested campaign object
     if not campaign_id and isinstance(lead_data.get("campaign"), dict):
-        campaign_id = lead_data["campaign"].get("id")
+        campaign_id = (
+            lead_data["campaign"].get("id")
+            or lead_data["campaign"].get("uuid")
+        )
     campaign_id_str = str(campaign_id) if campaign_id else ""
 
-    if config.BISON_OUTBOUND_CAMPAIGN_ID and campaign_id_str != config.BISON_OUTBOUND_CAMPAIGN_ID:
-        # Log full data structure so we can find the campaign_id field
+    if allowed_ids and campaign_id_str not in allowed_ids:
+        # Log full data structure so we can discover the right field
         data_summary = {}
         if isinstance(lead_data, dict):
             for k, v in lead_data.items():
@@ -172,8 +183,8 @@ async def webhook_bison(request: Request, db: Session = Depends(get_db)):
                 else:
                     data_summary[k] = v
         log_action(db, "bison_webhook_ignored",
-                   f"Campaign mismatch. campaign_id={campaign_id}. "
-                   f"Full data: {json.dumps(data_summary, default=str)[:800]}")
+                   f"Campaign mismatch. found={campaign_id}. allowed={allowed_ids}. "
+                   f"Data: {json.dumps(data_summary, default=str)[:800]}")
         return {"status": "ignored", "reason": "wrong_campaign"}
 
     lead_email = (
