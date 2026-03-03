@@ -38,6 +38,10 @@ def init_db():
     _add_column_if_missing("leads", "bison_reply_id", "INTEGER")
     _add_column_if_missing("leads", "bison_sender_email_id", "INTEGER")
 
+    # Fix empty strings to NULL for unique nullable columns
+    _fix_empty_strings_to_null("leads", "twenty_contact_id")
+    _fix_empty_strings_to_null("leads", "twenty_opportunity_id")
+
 
 def _add_column_if_missing(table: str, column: str, col_type: str):
     """Add a column to an existing table if it doesn't exist yet."""
@@ -47,4 +51,11 @@ def _add_column_if_missing(table: str, column: str, col_type: str):
     if column not in existing:
         with engine.begin() as conn:
             conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}"))
+
+
+def _fix_empty_strings_to_null(table: str, column: str):
+    """Convert empty strings to NULL for unique nullable columns."""
+    from sqlalchemy import text
+    with engine.begin() as conn:
+        conn.execute(text(f"UPDATE {table} SET {column} = NULL WHERE {column} = ''"))
 
