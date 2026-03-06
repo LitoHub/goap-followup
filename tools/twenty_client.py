@@ -158,10 +158,50 @@ class TwentyCRMClient:
         logger.info(f"Updated GOAP pipeline record {record_id}")
         return record
 
+    # --- GOAP Existing Pipeline (manual-send workflow) ---
+
+    def create_manual_pipeline_record(self, name: str, lead_email: str = "",
+                                       bison_inbox_id: str = "",
+                                       bison_campaign_id: str = "",
+                                       bison_followup_campaign_id: str = "",
+                                       person_id: str = "",
+                                       sent_email_subject: str = "") -> dict:
+        """Create a new record in the GOAP EXISTING custom object."""
+        payload: dict[str, Any] = {
+            "name": name,
+            "campaignStatus": "INITIAL_SEND",
+            "bisonInboxId": bison_inbox_id,
+        }
+        if lead_email:
+            payload["leadEmail"] = {"primaryEmail": lead_email}
+        if bison_campaign_id:
+            payload["bisonCampaignId"] = bison_campaign_id
+        if bison_followup_campaign_id:
+            payload["bisonFollowupCampaignId"] = bison_followup_campaign_id
+        if sent_email_subject:
+            payload["sentEmailSubject"] = sent_email_subject
+        result = self._request("POST", "/rest/goapExistings", json=payload)
+        record = self._extract_data(result)
+        logger.info(f"Created GOAP Existing record: {name} (id={record.get('id', '')})")
+        return record
+
+    def update_manual_pipeline_record(self, record_id: str, **fields) -> dict:
+        """Update a GOAP EXISTING pipeline record.
+
+        Common updates:
+            campaignStatus="RESPONDED"
+            lastContactDate="2026-01-01T00:00:00Z"
+        """
+        result = self._request("PATCH", f"/rest/goapExistings/{record_id}", json=fields)
+        record = self._extract_data(result)
+        logger.info(f"Updated GOAP Existing record {record_id}")
+        return record
+
     # --- Notes ---
 
     def create_note(self, text: str, contact_ids: list[str] | None = None,
-                    pipeline_record_id: str = "") -> dict:
+                    pipeline_record_id: str = "",
+                    manual_pipeline_record_id: str = "") -> dict:
         """Create a note and link it to person/pipeline record via noteTargets."""
         payload: dict[str, Any] = {
             "title": text[:255] if len(text) > 255 else text,
@@ -182,6 +222,8 @@ class TwentyCRMClient:
                         targets.append(("person", pid))
             if pipeline_record_id:
                 targets.append(("goapNewPipeline", pipeline_record_id))
+            if manual_pipeline_record_id:
+                targets.append(("goapExisting", manual_pipeline_record_id))
 
             for target_type, target_id in targets:
                 try:

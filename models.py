@@ -25,7 +25,9 @@ class Lead(Base):
     bison_inbox_id = Column(String(100), nullable=False)
     twenty_contact_id = Column(String(100), nullable=True, unique=True)
     twenty_opportunity_id = Column(String(100), nullable=True, unique=True)
+    workflow_type = Column(String(30), nullable=False, default="inbound")  # "inbound" or "manual_send"
     campaign_status = Column(String(50), nullable=False, default="New")
+    twenty_manual_pipeline_id = Column(String(100), nullable=True, unique=True)
     lead_magnet_url = Column(Text, nullable=True)
     last_contact_date = Column(DateTime, nullable=True)
     follow_up_count = Column(Integer, nullable=False, default=0)

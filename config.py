@@ -13,6 +13,10 @@ BISON_API_KEY = os.getenv("BISON_API_KEY", "")
 BISON_BASE_URL = os.getenv("BISON_BASE_URL", "https://dedi.emailbison.com")
 BISON_OUTBOUND_CAMPAIGN_ID = os.getenv("BISON_OUTBOUND_CAMPAIGN_ID", "")  # Only process replies from this campaign
 BISON_FOLLOWUP_CAMPAIGN_ID = os.getenv("BISON_FOLLOWUP_CAMPAIGN_ID", "")  # Pre-built follow-up campaign
+BISON_MANUAL_FOLLOWUP_CAMPAIGN_ID = os.getenv("BISON_MANUAL_FOLLOWUP_CAMPAIGN_ID", "")  # Follow-up campaign for manual sends
+
+# Notifications
+NOTIFICATION_EMAIL = os.getenv("NOTIFICATION_EMAIL", "")  # Email to notify when manual-workflow leads reply
 
 # Google Gemini (sentiment analysis)
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")

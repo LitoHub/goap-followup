@@ -33,7 +33,10 @@ def sync_statuses():
 
     try:
         # Find active leads (in follow-up sequence)
-        active_statuses = ["Lead Magnet Sent", "Follow-up 1", "Follow-up 2"]
+        active_statuses = [
+            "Lead Magnet Sent", "Follow-up 1", "Follow-up 2",  # inbound workflow
+            "Initial Send",  # manual-send workflow
+        ]
         active_leads = db.query(Lead).filter(
             Lead.campaign_status.in_(active_statuses)
         ).all()

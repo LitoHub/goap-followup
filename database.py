@@ -38,9 +38,14 @@ def init_db():
     _add_column_if_missing("leads", "bison_reply_id", "INTEGER")
     _add_column_if_missing("leads", "bison_sender_email_id", "INTEGER")
 
+    # New columns for manual-send workflow
+    _add_column_if_missing("leads", "workflow_type", "VARCHAR(30) DEFAULT 'inbound'")
+    _add_column_if_missing("leads", "twenty_manual_pipeline_id", "VARCHAR(100)")
+
     # Fix empty strings to NULL for unique nullable columns
     _fix_empty_strings_to_null("leads", "twenty_contact_id")
     _fix_empty_strings_to_null("leads", "twenty_opportunity_id")
+    _fix_empty_strings_to_null("leads", "twenty_manual_pipeline_id")
 
 
 def _add_column_if_missing(table: str, column: str, col_type: str):

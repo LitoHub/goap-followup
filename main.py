@@ -17,6 +17,7 @@ from models import Lead, SystemLog
 from tools.twenty_client import TwentyCRMClient
 from tools.bison_client import BisonClient
 from tools.sentiment import analyze_sentiment
+from tools.notifications import send_reply_notification
 from scheduler import start_scheduler, shutdown_scheduler
 
 logging.basicConfig(level=getattr(logging, config.LOG_LEVEL))
@@ -75,7 +76,10 @@ app = FastAPI(title="GOAP Follow-up System", lifespan=lifespan)
 def health_check(db: Session = Depends(get_db)):
     total_leads = db.query(Lead).count()
     active_leads = db.query(Lead).filter(
-        Lead.campaign_status.in_(["Lead Magnet Sent", "Follow-up 1", "Follow-up 2"])
+        Lead.campaign_status.in_([
+            "Lead Magnet Sent", "Follow-up 1", "Follow-up 2",
+            "Initial Send",
+        ])
     ).count()
     return {
         "status": "ok",
@@ -121,6 +125,8 @@ def get_leads(db: Session = Depends(get_db)):
             "bison_inbox_id": l.bison_inbox_id,
             "twenty_contact_id": l.twenty_contact_id,
             "twenty_opportunity_id": l.twenty_opportunity_id,
+            "twenty_manual_pipeline_id": l.twenty_manual_pipeline_id,
+            "workflow_type": l.workflow_type,
             "campaign_status": l.campaign_status,
             "sentiment": l.sentiment,
             "created_at": l.created_at.isoformat() if l.created_at else None,
@@ -202,6 +208,10 @@ async def webhook_bison(request: Request, db: Session = Depends(get_db)):
                f"Lead: {json.dumps({k: v for k, v in lead_data.items() if not isinstance(v, (dict, list))}, default=str)[:500]}")
     logger.info(f"Bison webhook received: event={event_type}")
 
+    # Handle manual email sent events (separate workflow)
+    if event_type in {"MANUAL_EMAIL_SENT", "manual_email_sent"}:
+        return _handle_manual_email_sent(db, lead_data, campaign_obj, sender_obj)
+
     # Only process LEAD_INTERESTED and LEAD_REPLIED events
     valid_events = {"LEAD_INTERESTED", "LEAD_REPLIED",
                     "contact_interested", "contact_replied"}
@@ -260,19 +270,56 @@ async def webhook_bison(request: Request, db: Session = Depends(get_db)):
 
 def _handle_existing_lead_reply(db: Session, lead: Lead, lead_data: dict) -> dict:
     """Kill switch: cancel follow-ups when a lead in our system replies."""
-    active_statuses = {"Lead Magnet Sent", "Follow-up 1", "Follow-up 2", "Follow-up 3"}
+    inbound_active = {"Lead Magnet Sent", "Follow-up 1", "Follow-up 2", "Follow-up 3"}
+    manual_active = {"Initial Send", "Follow-up 1", "Follow-up 2", "Follow-up 3"}
+    active_statuses = inbound_active | manual_active
 
     if lead.campaign_status in active_statuses:
         lead.campaign_status = "Responded"
         db.commit()
 
         log_action(db, "sequence_killed",
-                   f"Lead {lead.email} replied. Status changed to Responded.",
+                   f"Lead {lead.email} replied (workflow={lead.workflow_type}). "
+                   f"Status changed to Responded.",
                    lead_id=lead.id)
 
-        # Update Twenty CRM
+        # Update the correct Twenty CRM pipeline based on workflow type
         try:
-            if lead.twenty_opportunity_id:
+            if lead.workflow_type == "manual_send" and lead.twenty_manual_pipeline_id:
+                # Analyze sentiment to distinguish RESPONDED vs UNSUBSCRIBED
+                reply_text = (
+                    lead_data.get("reply_text", "")
+                    or lead_data.get("body", "")
+                    or lead_data.get("text_body", "")
+                )
+                clean_reply = _strip_html(reply_text)
+                sentiment = analyze_sentiment(clean_reply) if clean_reply else "positive"
+
+                if sentiment == "negative":
+                    crm_status = "UNSUBSCRIBED"
+                    lead.campaign_status = "Unsubscribed"
+                    db.commit()
+                    note_prefix = "[UNSUBSCRIBED] Negative reply detected"
+                else:
+                    crm_status = "RESPONDED"
+                    note_prefix = "[ACTION REQUIRED] Reply detected — lead responded"
+
+                twenty.update_manual_pipeline_record(
+                    lead.twenty_manual_pipeline_id,
+                    campaignStatus=crm_status,
+                )
+                twenty.create_note(
+                    f"{note_prefix} to manual email. "
+                    f"Follow-up sequence cancelled automatically.",
+                    contact_ids=[lead.twenty_contact_id] if lead.twenty_contact_id else None,
+                    manual_pipeline_record_id=lead.twenty_manual_pipeline_id,
+                )
+                # Send notification for positive replies
+                if sentiment != "negative":
+                    lead_name = f"{lead.first_name or ''} {lead.last_name or ''}".strip()
+                    send_reply_notification(lead.email, lead_name, clean_reply)
+
+            elif lead.twenty_opportunity_id:
                 twenty.update_pipeline_record(
                     lead.twenty_opportunity_id,
                     campaignStatus="RESPONDED",
@@ -401,6 +448,132 @@ def _handle_new_lead(db: Session, email: str, lead_data: dict, payload: dict) ->
             logger.error("Failed to log CRM creation error to DB")
 
     return {"status": "lead_created", "lead_id": lead.id, "email": email}
+
+
+def _handle_manual_email_sent(db: Session, lead_data: dict,
+                               campaign_obj: dict, sender_obj: dict) -> dict:
+    """Handle MANUAL_EMAIL_SENT: move lead to follow-up campaign + create CRM records."""
+    # Extract lead email
+    lead_email = (
+        lead_data.get("email", "")
+        or lead_data.get("lead_email", "")
+        or lead_data.get("email_address", "")
+    )
+    if isinstance(lead_email, str):
+        lead_email = lead_email.strip().lower()
+    else:
+        lead_email = ""
+
+    if not lead_email:
+        log_action(db, "manual_send_ignored", "No email found in payload", level="warning")
+        return {"status": "ignored", "reason": "no_email"}
+
+    # Check if lead already exists in manual workflow
+    existing_lead = db.query(Lead).filter(Lead.email == lead_email).first()
+    if existing_lead and existing_lead.twenty_manual_pipeline_id:
+        log_action(db, "manual_send_duplicate",
+                   f"Lead {lead_email} already in manual workflow",
+                   lead_id=existing_lead.id)
+        return {"status": "already_exists", "email": lead_email}
+
+    # Extract Bison IDs
+    bison_lead_id = lead_data.get("lead_id") or lead_data.get("id")
+    bison_sender_email_id = lead_data.get("sender_email_id") or sender_obj.get("id")
+    inbox_id = lead_data.get("sender_email", "") or sender_obj.get("email", "")
+    first_name = lead_data.get("first_name", "")
+    if not first_name and lead_data.get("lead_name"):
+        first_name = lead_data["lead_name"].split()[0]
+    last_name = lead_data.get("last_name", "")
+    campaign_id_source = str(campaign_obj.get("id") or lead_data.get("campaign_id", ""))
+    email_subject = lead_data.get("reply_email_subject", "") or lead_data.get("email_subject", "")
+
+    # Extract scheduled email info for subject fallback
+    scheduled_obj = lead_data.get("scheduled_email", {})
+    if not email_subject and isinstance(scheduled_obj, dict):
+        email_subject = scheduled_obj.get("subject", "")
+
+    # Step 1: Attach to follow-up campaign in Bison
+    followup_campaign_id = config.BISON_MANUAL_FOLLOWUP_CAMPAIGN_ID
+    if followup_campaign_id and bison_lead_id:
+        try:
+            bison.attach_leads_to_campaign(followup_campaign_id, [bison_lead_id])
+            log_action(db, "manual_followup_attached",
+                       f"Lead {lead_email} attached to manual follow-up campaign {followup_campaign_id}")
+        except Exception as e:
+            log_action(db, "manual_followup_attach_failed", str(e)[:500], level="error")
+    elif not followup_campaign_id:
+        log_action(db, "config_warning",
+                   "BISON_MANUAL_FOLLOWUP_CAMPAIGN_ID not set", level="warning")
+
+    # Step 2: Create or update local DB record
+    if existing_lead:
+        lead = existing_lead
+        lead.workflow_type = "manual_send"
+    else:
+        lead = Lead(
+            email=lead_email,
+            first_name=first_name,
+            last_name=last_name,
+            bison_lead_id=bison_lead_id,
+            bison_sender_email_id=bison_sender_email_id,
+            bison_inbox_id=str(inbox_id),
+            workflow_type="manual_send",
+            campaign_status="Initial Send",
+        )
+        db.add(lead)
+    db.commit()
+    db.refresh(lead)
+
+    log_action(db, "manual_lead_created",
+               f"Manual-send lead: {lead_email} (bison_lead_id={bison_lead_id})",
+               lead_id=lead.id)
+
+    # Step 3: Create in Twenty CRM
+    try:
+        person = twenty.find_or_create_person(
+            email=lead_email,
+            first_name=first_name,
+            last_name=last_name,
+        )
+        person_id = person.get("id", "") or None
+        if not existing_lead:
+            lead.twenty_contact_id = person_id
+
+        lead_full_name = f"{first_name} {last_name}".strip() or lead_email
+        pipeline_record = twenty.create_manual_pipeline_record(
+            name=lead_full_name,
+            lead_email=lead_email,
+            bison_inbox_id=str(inbox_id),
+            bison_campaign_id=campaign_id_source,
+            bison_followup_campaign_id=str(followup_campaign_id),
+            person_id=person_id,
+            sent_email_subject=email_subject,
+        )
+        record_id = pipeline_record.get("id", "") or None
+        lead.twenty_manual_pipeline_id = record_id
+        lead.last_contact_date = datetime.now(timezone.utc)
+        db.commit()
+
+        twenty.create_note(
+            f"Manual email sent to {lead_email}. Moved to follow-up campaign. "
+            f"Source campaign: {campaign_id_source}.",
+            contact_ids=[person_id] if person_id else None,
+            manual_pipeline_record_id=record_id,
+        )
+
+        log_action(db, "manual_crm_created",
+                   f"Twenty CRM person={person_id}, manual_pipeline={record_id}",
+                   lead_id=lead.id)
+
+    except Exception as e:
+        logger.exception(f"CRM creation failed for manual send {lead_email}: {e}")
+        try:
+            db.rollback()
+            log_action(db, "manual_crm_failed", str(e)[:500], lead_id=lead.id, level="error")
+        except Exception:
+            logger.error("Failed to log manual CRM error to DB")
+
+    return {"status": "manual_send_processed", "lead_id": lead.id, "email": lead_email}
 
 
 # --- Twenty CRM Webhook ---
