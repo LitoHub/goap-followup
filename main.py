@@ -218,11 +218,42 @@ async def webhook_bison(request: Request, db: Session = Depends(get_db)):
     if event_type not in valid_events:
         return {"status": "ignored", "event": event_type}
 
-    # Only process replies from our outbound campaign.
+    # Extract email from lead object or flat fields
+    lead_email = (
+        lead_data.get("email", "")
+        or lead_data.get("lead_email", "")
+        or lead_data.get("email_address", "")
+    )
+    if isinstance(lead_email, str):
+        lead_email = lead_email.strip().lower()
+    else:
+        lead_email = ""
+
+    if not lead_email:
+        log_action(db, "bison_webhook_ignored",
+                   f"No email found. Lead keys: {list(lead_data.keys())[:20]}",
+                   level="warning")
+        return {"status": "ignored", "reason": "no_email"}
+
+    # Check if lead already exists in our DB BEFORE campaign filtering.
+    # If the lead is already in our system, process their reply regardless
+    # of which Bison campaign it came from (e.g. manual sends reply on the
+    # original campaign, not the follow-up campaign).
+    existing_lead = db.query(Lead).filter(Lead.email == lead_email).first()
+
+    if existing_lead:
+        return _handle_existing_lead_reply(db, existing_lead, lead_data)
+
+    # For new leads, only process replies from our configured campaigns.
     allowed_ids = set()
-    if config.BISON_OUTBOUND_CAMPAIGN_ID:
-        for cid in config.BISON_OUTBOUND_CAMPAIGN_ID.split(","):
-            allowed_ids.add(cid.strip())
+    for campaign_env in (
+        config.BISON_OUTBOUND_CAMPAIGN_ID,
+        config.BISON_FOLLOWUP_CAMPAIGN_ID,
+        config.BISON_MANUAL_FOLLOWUP_CAMPAIGN_ID,
+    ):
+        if campaign_env:
+            for cid in campaign_env.split(","):
+                allowed_ids.add(cid.strip())
 
     # Extract campaign ID from nested campaign object or flat fields
     campaign_id = (
@@ -242,30 +273,7 @@ async def webhook_bison(request: Request, db: Session = Depends(get_db)):
                    level="info")
         return {"status": "ignored", "reason": "wrong_campaign"}
 
-    # Extract email from lead object or flat fields
-    lead_email = (
-        lead_data.get("email", "")
-        or lead_data.get("lead_email", "")
-        or lead_data.get("email_address", "")
-    )
-    if isinstance(lead_email, str):
-        lead_email = lead_email.strip().lower()
-    else:
-        lead_email = ""
-
-    if not lead_email:
-        log_action(db, "bison_webhook_ignored",
-                   f"No email found. Lead keys: {list(lead_data.keys())[:20]}",
-                   level="warning")
-        return {"status": "ignored", "reason": "no_email"}
-
-    # Check if lead already exists in our DB
-    existing_lead = db.query(Lead).filter(Lead.email == lead_email).first()
-
-    if existing_lead:
-        return _handle_existing_lead_reply(db, existing_lead, lead_data)
-    else:
-        return _handle_new_lead(db, lead_email, lead_data, payload)
+    return _handle_new_lead(db, lead_email, lead_data, payload)
 
 
 def _handle_existing_lead_reply(db: Session, lead: Lead, lead_data: dict) -> dict:
@@ -282,6 +290,19 @@ def _handle_existing_lead_reply(db: Session, lead: Lead, lead_data: dict) -> dic
                    f"Lead {lead.email} replied (workflow={lead.workflow_type}). "
                    f"Status changed to Responded.",
                    lead_id=lead.id)
+
+        # Remove lead from Bison follow-up campaign so emails stop
+        if lead.bison_lead_id:
+            campaign_id_to_detach = (
+                config.BISON_MANUAL_FOLLOWUP_CAMPAIGN_ID
+                if lead.workflow_type == "manual_send"
+                else config.BISON_FOLLOWUP_CAMPAIGN_ID
+            )
+            if campaign_id_to_detach:
+                try:
+                    bison.detach_leads_from_campaign(campaign_id_to_detach, [lead.bison_lead_id])
+                except Exception as e:
+                    log_action(db, "bison_detach_failed", str(e), lead_id=lead.id, level="warning")
 
         # Update the correct Twenty CRM pipeline based on workflow type
         try:
